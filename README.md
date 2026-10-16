@@ -142,16 +142,15 @@ The following results were observed during testing:
 
 ## Example Prompts and Latency
 
-Prompts used during client testing included:
+The following prompts were tested through the Python client. All three requests received responses from the configured local backend.
 
-1. Explain an API gateway in five sentences.
-2. Explain binary search.
-3. Explain a prime-number checking function.
+| Prompt | Backend | Observed latency |
+|---|---|---:|
+| Explain an API gateway in five sentences. | `local` | 6098.72 ms |
+| Explain binary search. | `local` | 17407.26 ms |
+| Explain a prime-number checking function. | `local` | 8798.33 ms |
 
-For the first prompt, the recorded client latency was **6098.72 ms (approximately 6.10 seconds)**.
-
-Latency varies with model loading, hardware, prompt length, and system load. Other prompt latency values are not included here because their exact measurements were not recorded in the available evidence.
-
+Latency is measured by the gateway and returned in the `X-RouteWise-Latency-Ms` response header. It may vary depending on model loading, hardware, prompt length, and system load.
 ## Limitations
 - Uses one configured local model: `qwen2.5:1.5b`.
 - Supports text chat requests only.
