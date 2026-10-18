@@ -1,172 +1,205 @@
 # RouteWise — Local AI Gateway
 
-## Overview
-RouteWise is a local AI gateway project that connects Python clients to a locally hosted language model. It uses FastAPI to validate incoming chat requests and forwards valid requests to Ollama, which runs the Qwen 2.5 1.5B model.
+A lightweight local AI gateway built with Python, FastAPI, and Ollama to route chat requests between multiple locally running language models.
 
-The gateway provides a single API endpoint for chat completions and handles backend connection failures, timeouts, and server errors.
+## Overview
+
+RouteWise provides a single API endpoint for interacting with multiple local language models. It supports explicit model selection, task-based routing, optional fallback, request validation, and routing metadata.
 
 ## Architecture
 
-`Python Client → FastAPI Gateway → Ollama → Qwen 2.5 1.5B → Response`
+```text
+Python Client
+     |
+     v
+FastAPI Gateway
+     |
+     v
+Request Validation
+     |
+     v
+Model Routing
+     |
+     +----------------------+
+     |                      |
+     v                      v
+General Model           Coding Model
+Qwen 2.5 1.5B           Qwen 2.5 Coder 1.5B
+     |                      |
+     +----------+-----------+
+                |
+                v
+           Ollama Runtime
+                |
+                v
+             Response
+```
 
-## Technologies
+## Technology Stack
+
 - Python
 - FastAPI
 - Uvicorn
 - Ollama
 - Qwen 2.5 1.5B
+- Qwen 2.5 Coder 1.5B
 - HTTPX
 - Requests
 - Pytest
 
 ## Features
-- Runs a local language model through Ollama.
-- Exposes a chat completion API.
-- Validates request fields, message roles, content, and parameters.
-- Maps the client model alias `local` to `qwen2.5:1.5b`.
-- Returns backend and request latency information in response headers.
-- Handles backend connection failures, timeouts, and server errors.
-- Includes automated tests for request validation and backend error handling.
-- Provides a Python client for sending prompts through the gateway.
+
+- Unified chat-completion API.
+- Local language model inference through Ollama.
+- Two configured model aliases: `general` and `coding`.
+- Task-based automatic routing using the task category supplied by the client.
+- Explicit model selection.
+- Backward compatibility with the `local` alias.
+- Optional fallback to the alternate configured model.
+- Request validation for messages, roles, content, and parameters.
+- Response headers containing routing information and latency.
+- Error handling for backend connection failures, timeouts, and server errors.
+- Python client and automated gateway tests.
+
+## Model Configuration
+
+| Alias | Model | Purpose |
+|---|---|---|
+| `general` | `qwen2.5:1.5b` | General-purpose queries |
+| `coding` | `qwen2.5-coder:1.5b` | Programming and coding tasks |
+| `local` | Existing compatibility alias | Preserves earlier client behavior |
 
 ## Requirements
+
 - Python 3
 - Ollama
-- The `qwen2.5:1.5b` model
-- A Python virtual environment
+- Required Qwen models
+- Python virtual environment
+- Project dependencies
 
-## Setup
+## Installation
 
-Create and activate the virtual environment:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-python -m pip install fastapi uvicorn httpx pytest requests
-```
-
-Download the model if it is not already installed:
-
-```bash
-ollama pull qwen2.5:1.5b
-```
-
-Ensure the Ollama service is running before sending requests.
-
-## Running the Gateway
-
-From the project directory, start the gateway:
-
-```bash
-python -m uvicorn gateway:app --host 127.0.0.1 --port 8000
-```
-
-The gateway listens on `127.0.0.1:8000`.
-
-- Health endpoint: `GET /health`
-- Interactive API documentation: `http://127.0.0.1:8000/docs`
-- Chat completion endpoint: `POST /v1/chat/completions`
-
-## Using the Python Client
-
-Keep the gateway running in one terminal. Open a second terminal and run:
+### 1. Navigate to the Project
 
 ```bash
 cd ~/RouteWise
-source .venv/bin/activate
-python client.py
 ```
 
-Enter a question when prompted. The client displays the AI response, backend name, and request latency.
+### 2. Activate the Virtual Environment
 
-## Sample API Request
+```bash
+source .venv/bin/activate
+```
 
-Send a POST request to `/v1/chat/completions` with this JSON body:
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Download the Models
+
+```bash
+ollama pull qwen2.5:1.5b
+ollama pull qwen2.5-coder:1.5b
+```
+
+Verify the installed models:
+
+```bash
+ollama list
+```
+
+Ensure that the Ollama service is running before starting the gateway.
+
+## Running the Gateway
+
+Start the FastAPI application using the actual module and application object defined in the project.
+
+For example, if `gateway.py` contains an application object named `app`:
+
+```bash
+uvicorn gateway:app --host 127.0.0.1 --port 8000
+```
+
+Local gateway address:
+
+```text
+http://127.0.0.1:8000
+```
+
+## API Usage
+
+Example general-purpose request:
 
 ```json
 {
-  "model": "local",
+  "model": "general",
+  "task": "general",
   "messages": [
     {
       "role": "user",
-      "content": "Explain an API gateway in five sentences."
+      "content": "Explain how an API gateway works."
     }
-  ],
-  "max_tokens": 200,
-  "stream": false
+  ]
 }
 ```
 
-A successful request returns HTTP `200` and a chat completion response. The gateway adds these response headers:
+Example coding request:
 
-- `X-RouteWise-Backend`
-- `X-RouteWise-Latency-Ms`
-
-## Automated Testing
-
-Run the automated gateway tests:
-
-```bash
-python -m pytest -v test_gateway.py
+```json
+{
+  "model": "coding",
+  "task": "coding",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write a Python function to check whether a string is a palindrome."
+    }
+  ]
+}
 ```
 
-The test suite covers:
-- Health endpoint
-- Invalid message role
-- Empty message content
-- Successful chat request
-- Ollama connection failure
-- Ollama timeout
-- Ollama server error
+Use the endpoint and request fields supported by the actual implementation.
 
-**Recorded test result:** 7 tests passed. One Starlette deprecation warning was reported by the testing dependencies; it did not cause the tests to fail.
+## Model Routing and Fallback
 
-## Manual Validation and Failure Handling
+RouteWise supports:
 
-The following results were observed during testing:
+- **Explicit routing:** Select a configured model using its alias.
+- **Task-based routing:** Select a model according to the task category supplied by the client.
+- **Fallback:** Attempt the alternate configured model when enabled and an applicable failure occurs.
 
-| Test case | Observed result |
-|---|---|
-| Missing `messages` field | HTTP 422 |
-| Empty `messages` list | HTTP 422 |
-| Unsupported model (`claude`) | HTTP 422 |
-| `max_tokens` set to `99999` | HTTP 422 |
-| `stream: true` | HTTP 422 |
-| Ollama service unavailable | HTTP 503 |
-| Request after restarting Ollama | HTTP 200 |
+The `local` alias is maintained for compatibility with the earlier client.
 
-## Example Prompts and Latency
+## Response Metadata
 
-The following prompts were tested through the Python client. All three requests received responses from the configured local backend.
+The gateway provides routing information through response headers, including:
 
-| Prompt | Backend | Observed latency |
-|---|---|---:|
-| Explain an API gateway in five sentences. | `local` | 6098.72 ms |
-| Explain binary search. | `local` | 17407.26 ms |
-| Explain a prime-number checking function. | `local` | 8798.33 ms |
+- Selected model.
+- Routing reason.
+- Models attempted.
+- Fallback status.
+- Request latency.
 
-Latency is measured by the gateway and returned in the `X-RouteWise-Latency-Ms` response header. It may vary depending on model loading, hardware, prompt length, and system load.
-## Limitations
-- Uses one configured local model: `qwen2.5:1.5b`.
-- Supports text chat requests only.
-- Streaming responses are not supported.
-- Does not currently implement multiple backend routing or load balancing.
-- Response latency can vary with system and model state.
+This information helps with debugging and evaluating gateway behavior.
 
-## Project Structure
+## Testing
 
-- `gateway.py` — FastAPI gateway and request validation.
-- `client.py` — Python client for sending requests through the gateway.
-- `test_local.py` — Direct local model test script.
-- `test_gateway.py` — Automated gateway tests.
-- `README.md` — Project documentation.
+Run the automated tests using Pytest:
 
-## Current Status
+```bash
+pytest
+```
 
-The gateway, Python client, request validation, backend error handling, and automated test suite have been exercised locally. The project is documented with the observed test results and known limitations.
+Key testing scenarios include:
+
+- General and coding model requests.
+- Explicit model selection.
+- Task-based routing.
+- Alias compatibility.
+- Fallback behavior.
+- Request validation.
+- Backend errors and timeouts.
+- Response metadata.
 
