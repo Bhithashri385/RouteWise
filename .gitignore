@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 test_gateway_backup.py
+routewise.db
+routewise.db-wal
+routewise.db-shm
+gateway_day2_backup.py

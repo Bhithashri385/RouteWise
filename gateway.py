@@ -1,11 +1,59 @@
+import asyncio
+import logging
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request as HTTPRequest, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from metrics_db import save_request
+
 app = FastAPI(title="RouteWise — Day 3")
+
+logger = logging.getLogger("routewise")
+
+
+@app.middleware("http")
+async def track_request(request: HTTPRequest, call_next):
+    if request.url.path != "/v1/chat/completions":
+        return await call_next(request)
+
+    request_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    started = time.perf_counter()
+    status_code = 500
+
+    request.state.metrics = {}
+
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-RouteWise-Request-Id"] = request_id
+        return response
+
+    finally:
+        latency_ms = round(
+            (time.perf_counter() - started) * 1000,
+            2,
+        )
+
+        try:
+            await asyncio.to_thread(
+                save_request,
+                request_id,
+                timestamp,
+                status_code,
+                latency_ms,
+                dict(request.state.metrics),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to save metrics for request %s",
+                request_id,
+            )
 
 OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
 
@@ -46,7 +94,9 @@ async def health():
 async def chat_completions(
     request: ChatRequest,
     response: Response,
+    http_request: HTTPRequest,
 ):
+
     # Select the primary model.
     if request.model in ("general", "coding"):
         selected = request.model
@@ -59,6 +109,18 @@ async def chat_completions(
         reason = f"automatic routing based on task: {request.task}"
 
     # Prepare the attempt order.
+
+    http_request.state.metrics.update({
+        "requested_model": request.model,
+        "task": request.task,
+        "reason": reason,
+        "attempts": [],
+        "backend": None,
+        "fallback_used": False,
+        "input_tokens": None,
+        "output_tokens": None,
+    })
+
     attempts = [selected]
 
     if request.allow_fallback:
@@ -74,6 +136,13 @@ async def chat_completions(
         for model_key in attempts:
             ollama_model = MODELS[model_key]
             attempted_models.append(model_key)
+
+            http_request.state.metrics["attempts"] = (
+                attempted_models.copy()
+            )
+            http_request.state.metrics["fallback_used"] = (
+                model_key != selected
+            )
 
             payload = {
                 "model": ollama_model,
@@ -109,6 +178,14 @@ async def chat_completions(
                 response.headers["X-RouteWise-Latency-Ms"] = str(
                     latency_ms
                 )
+
+                usage = result.json().get("usage") or {}
+
+                http_request.state.metrics.update({
+                    "backend": model_key,
+                    "input_tokens": usage.get("prompt_tokens"),
+                    "output_tokens": usage.get("completion_tokens"),
+                })
 
                 return result.json()
 
