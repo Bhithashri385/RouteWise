@@ -249,7 +249,7 @@ Open a second terminal. Keep the gateway running in the first terminal.
 ```bash
 cd ~/RouteWise
 source .venv/bin/activate
-python -m streamlit run dashboard.py --server.address 127.0.0.1
+python -m streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501
 ```
 
 Open the dashboard at:
