@@ -185,6 +185,8 @@ display_columns = [
     "backend",
     "attempts",
     "fallback_used",
+    "sensitive",
+    "allow_paid",
     "input_tokens",
     "output_tokens",
 ]
@@ -201,6 +203,8 @@ st.dataframe(
         "latency_ms": "Response Time",
         "backend": "Successful Backend",
         "attempts": "Model Attempts",
+        "sensitive": "Sensitive",
+        "allow_paid": "Paid Permission",
         "fallback_used": "Fallback",
         "input_tokens": "Input Tokens",
         "output_tokens": "Output Tokens",
