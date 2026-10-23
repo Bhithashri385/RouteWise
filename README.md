@@ -1,188 +1,211 @@
 # RouteWise — Local AI Gateway
 
-RouteWise is a small local AI gateway built with Python, FastAPI, and Ollama. It provides one API endpoint to interact with different local AI models and routes requests based on the selected model or task.
+**A lightweight AI gateway for routing requests across local and hosted language models.**
 
-The project also includes an optional fallback mechanism and a monitoring dashboard to track requests, failures, response times, and model usage.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Technology Stack](#technology-stack)
-- [Architecture](#architecture)
-- [Model Configuration](#model-configuration)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Running the Gateway](#running-the-gateway)
-- [Using the API](#using-the-api)
-- [Monitoring Dashboard](#monitoring-dashboard)
-- [Understanding the Metrics](#understanding-the-metrics)
-- [Privacy](#privacy)
-- [Testing](#testing)
-- [Project Structure](#project-structure)
+RouteWise is a Python-based AI gateway built using FastAPI and Ollama. It routes chat requests to suitable language models, supports configurable fallback behavior, applies security controls for hosted inference, and tracks request metrics through a monitoring dashboard.
 
 ## Overview
 
-When working with multiple AI models, it can be inconvenient to manage a separate API for each model. RouteWise solves this by providing a single gateway that forwards requests to the appropriate local model.
+RouteWise provides a unified API for interacting with multiple language models through a single gateway. It supports local inference for general and coding tasks, optional hosted-model integration, request validation, error handling, and performance monitoring.
 
-For example, general questions can be sent to the general-purpose model, while programming questions can be sent to the coding model.
+The project focuses on making AI inference easier to manage while maintaining control over privacy, API permissions, and request tracking.
 
-If the selected model fails and fallback is enabled, RouteWise can try the alternate model. The monitoring dashboard helps track how these requests perform.
+## Key Features
 
-## Features
-
-- One API endpoint for chat-completion requests.
-- Local AI inference using Ollama.
-- Separate general-purpose and coding models.
-- Automatic routing based on the requested task.
-- Explicit model selection.
-- Support for the existing `local` model alias.
-- Optional fallback to an alternate model.
-- Request validation and backend error handling.
-- Response headers containing routing and latency information.
-- SQLite-based request metrics storage.
-- Interactive dashboard for monitoring requests and failures.
-- Response-time statistics and successful requests grouped by model.
-- Token usage tracking when Ollama reports it.
-
-## Technology Stack
-
-- **Python** — Main programming language.
-- **FastAPI** — Builds the API gateway.
-- **Uvicorn** — Runs the gateway server.
-- **Ollama** — Runs AI models locally.
-- **Qwen 2.5 1.5B** — General-purpose model.
-- **Qwen 2.5 Coder 1.5B** — Coding model.
-- **HTTPX** — Sends requests to Ollama.
-- **SQLite** — Stores request metrics.
-- **Streamlit** — Builds the monitoring dashboard.
-- **Pandas** — Organizes metrics for display.
-- **Pytest** — Runs automated tests.
+- **Unified API:** Provides a common chat-completions endpoint for model requests.
+- **Intelligent Routing:** Routes requests to general-purpose or coding models based on the selected model and task.
+- **Local Inference:** Uses Ollama to run language models locally.
+- **Hosted Model Support:** Includes configurable DeepSeek API integration.
+- **Fallback Handling:** Supports fallback to an alternate local model when enabled.
+- **Security Controls:** Blocks sensitive requests from using hosted models and enforces paid-API permissions.
+- **Request Validation:** Validates incoming requests and handles invalid inputs.
+- **Error Handling:** Handles timeouts, connection failures, and backend HTTP errors.
+- **Request Metrics:** Records request status, latency, backend selection, attempts, fallback usage, and token usage where available.
+- **Monitoring Dashboard:** Provides a Streamlit dashboard for viewing request metrics.
+- **Automated Testing:** Includes gateway tests for routing, validation, permissions, errors, and fallback behavior.
 
 ## Architecture
 
 ```text
-Client
-  |
-  v
-FastAPI Gateway
-  |
-  v
-Request Validation
-  |
-  v
-Model Routing
-  |
-  +--------------------------+
-  |                          |
-  v                          v
-General Model             Coding Model
-  |                          |
-  +------------+-------------+
-               |
-               v
-        Ollama Runtime
-               |
-               v
-         API Response
-
-Gateway Request Metrics
-               |
-               v
-         SQLite Database
-               |
-               v
-       Streamlit Dashboard
+                 Client Application
+                         |
+                         v
+                 FastAPI Gateway
+                         |
+             Request Validation
+                         |
+                         v
+                Routing and Security
+                         |
+              +----------+----------+
+              |                     |
+              v                     v
+        Local Inference       Hosted Inference
+              |                     |
+              v                     v
+            Ollama              DeepSeek API
+              |                     |
+              +----------+----------+
+                         |
+                         v
+                  Model Response
+                         |
+                         v
+                Metrics Recording
+                         |
+                         v
+                 SQLite Database
+                         |
+                         v
+                Streamlit Dashboard
 ```
 
-The gateway handles incoming requests, selects the appropriate model, and returns the model response. Request metadata is stored separately in SQLite and displayed through the dashboard.
+Hosted inference is subject to the configured security and permission checks. Paid API access is disabled by default.
 
-## Model Configuration
+## Technology Stack
 
-| Alias | Ollama model | Purpose |
-|---|---|---|
-| `general` | `qwen2.5:1.5b` | General questions and everyday tasks |
-| `coding` | `qwen2.5-coder:1.5b` | Programming and coding tasks |
-| `local` | Maps to the general model | Compatibility with the earlier client |
+| Component | Technology |
+|---|---|
+| Programming Language | Python |
+| API Framework | FastAPI |
+| ASGI Server | Uvicorn |
+| Local Model Runtime | Ollama |
+| General Model | Qwen 2.5 1.5B |
+| Coding Model | Qwen 2.5 Coder 1.5B |
+| Hosted Model Integration | DeepSeek API |
+| HTTP Client | HTTPX |
+| Database | SQLite |
+| Dashboard | Streamlit |
+| Data Processing | Pandas |
+| Testing | Pytest |
 
-## Requirements
+## Supported Models
 
-Before running the project, make sure you have:
+| Model Alias | Purpose |
+|---|---|
+| `auto` | Selects a model based on the requested task |
+| `local` | Uses the default local general model |
+| `general` | Handles general-purpose questions |
+| `coding` | Handles programming-related questions |
+| `deepseek` | Requests hosted inference when permissions allow |
 
-- Python 3 installed.
-- Ollama installed and running.
-- The required Qwen models downloaded.
-- A Python virtual environment.
-- The project dependencies installed.
+The local models are managed through Ollama. Hosted inference requires a valid API configuration and the necessary permissions.
 
-## Installation
+## Request Routing and Fallback
 
-### 1. Open the project directory
+RouteWise supports automatic task-based routing and explicit model selection.
 
-```bash
-cd ~/RouteWise
+For example:
+- General questions can be routed to Qwen 2.5 1.5B.
+- Programming questions can be routed to Qwen 2.5 Coder 1.5B.
+- Hosted DeepSeek requests are allowed only when the required security and permission checks pass.
+
+When fallback is enabled, a failed DeepSeek request can fall back to the local general model. Local requests do not automatically fall back to hosted inference.
+
+## Security and Configuration
+
+RouteWise uses environment variables to configure hosted inference.
+
+Create a `.env` file in the project root:
+
+```env
+DEEPSEEK_API_KEY=your_actual_api_key
+DEEPSEEK_MODEL=deepseek-flash
+ENABLE_PAID_APIS=false
 ```
 
-### 2. Activate the virtual environment
+Replace the placeholder with your own API key if hosted inference is required.
+
+### Security Rules
+
+- Paid API access is disabled by default.
+- Hosted requests require server-side permission and request-level permission.
+- Requests marked as sensitive are blocked from hosted inference.
+- Missing API credentials prevent hosted inference.
+- The actual `.env` file must never be committed to GitHub.
+- API keys must not be exposed in logs or API responses.
+
+Keep `ENABLE_PAID_APIS=false` unless hosted inference is intentionally enabled after reviewing the provider's pricing and billing requirements.
+
+## Installation and Setup
+
+### Prerequisites
+
+- Python 3.12 or a compatible Python version
+- Ollama
+- Git
+- The required Python dependencies
+
+### 1. Clone the Repository
 
 ```bash
+git clone https://github.com/Bhithashri385/RouteWise.git
+cd RouteWise
+```
+
+### 2. Create a Virtual Environment
+
+```bash
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Install the dependencies
+### 3. Install Dependencies
 
 ```bash
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
-If you are setting up the Day 4 dashboard and Streamlit or Pandas are not already included in your requirements, install them using:
-
-```bash
-python -m pip install streamlit pandas
-```
-
-### 4. Download the required models
+### 4. Download the Local Models
 
 ```bash
 ollama pull qwen2.5:1.5b
 ollama pull qwen2.5-coder:1.5b
 ```
 
-Check the installed models:
+Ensure Ollama is running before sending requests to the local models.
+
+### 5. Configure Environment Variables
+
+Create `.env` using the configuration described in the Security and Configuration section. Keep paid APIs disabled unless needed.
+
+### 6. Start the Gateway
 
 ```bash
-ollama list
+uvicorn gateway:app --reload
 ```
 
-Make sure both models are available before testing normal routing and fallback.
+The API will be available at:
 
-## Running the Gateway
+`http://127.0.0.1:8000`
 
-Open a terminal in the project directory and run:
+### 7. Open API Documentation
+
+Visit:
+
+`http://127.0.0.1:8000/docs`
+
+Use the interactive Swagger UI to inspect endpoints and send test requests.
+
+### 8. Start the Monitoring Dashboard
+
+Open a separate terminal, activate the virtual environment, navigate to the project directory, and run:
 
 ```bash
-cd ~/RouteWise
-source .venv/bin/activate
-python -m uvicorn gateway:app --host 127.0.0.1 --port 8000 --reload
+streamlit run dashboard.py
 ```
 
-The gateway runs locally at:
+The dashboard will usually be available at:
 
-**http://localhost:8000**
+`http://localhost:8501`
 
-To explore and test the API, open:
+## API Usage
 
-**http://localhost:8000/docs**
-
-Keep the terminal open while using the gateway.
-
-## Using the API
-
-RouteWise exposes the following chat-completion endpoint:
+RouteWise exposes a chat-completions endpoint:
 
 `POST /v1/chat/completions`
 
-### Example: General request
+Example request for a local general-purpose model:
 
 ```json
 {
@@ -191,118 +214,68 @@ RouteWise exposes the following chat-completion endpoint:
   "messages": [
     {
       "role": "user",
-      "content": "Explain how an API gateway works."
+      "content": "Explain what an API gateway is."
     }
   ],
-  "max_tokens": 100,
+  "max_tokens": 200,
   "stream": false,
-  "allow_fallback": false
+  "allow_fallback": false,
+  "sensitive": false,
+  "allow_paid": false
 }
 ```
 
-### Example: Coding request
+The gateway validates the request, selects the backend, sends the request to the selected model, and returns the model response.
 
-```json
-{
-  "model": "coding",
-  "task": "coding",
-  "messages": [
-    {
-      "role": "user",
-      "content": "Write a Python function to check whether a string is a palindrome."
-    }
-  ],
-  "max_tokens": 100,
-  "stream": false,
-  "allow_fallback": false
-}
-```
+Hosted requests require the additional permissions enforced by the gateway.
 
-You can send these requests through the API documentation page at `http://localhost:8000/docs`.
+## Monitoring and Metrics
 
-### Model routing and fallback
+RouteWise uses SQLite to persist request metrics and Streamlit to display them.
 
-RouteWise supports explicit model selection and task-based routing.
+The monitoring workflow tracks information such as:
 
-When fallback is enabled, the gateway can try the alternate configured model if the first model attempt fails. If the alternate model also fails, the gateway returns an error.
+- Total requests and failed requests
+- Request status codes
+- Selected backend and model
+- Number of attempted backends
+- Whether fallback was used
+- Response latency
+- Input and output token usage, when available
+- Sensitive-request and paid-access permission flags
 
-The response headers include routing information such as:
+### Manual Monitoring Verification
 
-- `X-RouteWise-Backend`
-- `X-RouteWise-Model`
-- `X-RouteWise-Reason`
-- `X-RouteWise-Attempts`
-- `X-RouteWise-Fallback`
-- `X-RouteWise-Latency-Ms`
-- `X-RouteWise-Request-Id`
-
-These headers help explain how each request was handled.
-
-## Monitoring Dashboard
-
-RouteWise includes a Streamlit dashboard that displays request metrics stored in the local SQLite database.
-
-### Start the dashboard
-
-Open a second terminal. Keep the gateway running in the first terminal.
-
-```bash
-cd ~/RouteWise
-source .venv/bin/activate
-python -m streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501
-```
-
-Open the dashboard at:
-
-**http://localhost:8501**
-
-After sending requests through the gateway, click **Refresh** to reload the metrics.
-
-### Dashboard features
-
-- Total number of requests.
-- Successful and failed request counts.
-- Requests that used fallback.
-- Successful requests grouped by backend model.
-- Average, median, and 95th-percentile response times.
-- Reported input and output token totals.
-- A table of recent requests with routing metadata.
-
-The dashboard uses `routewise.db`, which is created locally by the metrics module.
-
-## Understanding the Metrics
-
-- **Total requests:** Number of completed gateway requests recorded in the database.
-- **Successful requests:** Requests that return an HTTP status code from 200 to 299.
-- **Failed requests:** Requests that return a status code outside that range, including validation errors.
-- **Successful requests by model:** Number of successful gateway requests handled by each backend model.
-- **Response time:** Time spent handling the request, including model attempts and gateway processing.
-- **Fallback request:** A request where the gateway attempts an alternate model after the initial model fails. A successful fallback still counts as one client request.
-- **Token usage:** Input and output token counts reported by Ollama for successful responses. If a count is missing, it remains unknown rather than being treated as zero.
-
-Response-time statistics are more useful when collected over a larger number of requests. A small sample may not represent normal performance.
-
-## Privacy
-
-RouteWise does not store prompts or model answers in its metrics database.
-
-The database stores request identifiers, timestamps, HTTP status codes, latency, and approved routing metadata, such as the requested model, backend, model attempts, fallback status, and reported token counts.
-
-The local database files are excluded from Git to avoid uploading local request metrics.
+1. Start the FastAPI gateway.
+2. Open `/docs` and send requests.
+3. Refresh the Streamlit dashboard.
+4. Verify that request counts, backend information, failures, fallback details, and available token usage reflect the requests.
 
 ## Testing
 
-Run the automated tests from the project directory:
+Run the gateway test suite from the project root:
 
 ```bash
-cd ~/RouteWise
-source .venv/bin/activate
-pytest -v
+pytest -q test_gateway.py
 ```
 
-The tests should cover supported routing behavior, model selection, fallback, request validation, backend errors, and response metadata.
+The current gateway test suite has **11 passing tests**.
 
-The monitoring workflow should also be checked manually by sending requests through `/docs` and refreshing the dashboard.
+The tests cover areas including:
+- Gateway health and request validation
+- Local model routing
+- Hosted inference permission checks
+- Sensitive-request blocking
+- Backend error handling
+- Mocked fallback from DeepSeek to the local general model
+
+Run the Python syntax check with:
+
+```bash
+python -m py_compile gateway.py
+```
+
+**Testing note:** Automated tests and mocked fallback tests do not confirm that the real DeepSeek service has been contacted successfully. A live DeepSeek API request remains to be verified.
 
 ## Project Structure
 
@@ -311,16 +284,27 @@ RouteWise/
 ├── gateway.py
 ├── metrics_db.py
 ├── dashboard.py
+├── test_gateway.py
 ├── README.md
 ├── requirements.txt
 ├── .gitignore
-└── tests/
+└── .venv/
 ```
 
-The exact test filenames may differ depending on the current project setup.
+The structure above reflects the main files currently identified in the project. Additional files may exist in the repository.
 
-## Current Status
+## Current Status and Future Improvements
 
-RouteWise has a working local gateway and a request-monitoring dashboard. The dashboard tracks request counts, failures, model routing, response times, fallback activity, and reported token usage.
+The project includes a local AI gateway, general and coding model routing, configurable hosted-model integration, request security checks, fallback handling, persistent metrics, and a monitoring dashboard.
 
-The project is being developed incrementally, with testing and improvements added as new features are introduced.
+The gateway test suite currently passes 11 tests.
+
+Potential future improvements include:
+- Verifying a live DeepSeek API request after checking billing and pricing.
+- Expanding integration tests for hosted backend responses.
+- Improving dashboard visualizations and operational monitoring.
+- Adding more detailed performance comparisons between local models.
+
+## License
+
+A license has not yet been specified. Add an appropriate license before distributing the project under explicit open-source terms.
