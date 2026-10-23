@@ -100,7 +100,24 @@ async def health():
         "models": MODELS,
     }
 
+def prepare_backend_request(alias, payload):
+    if alias == "deepseek":
+        if not PAID_APIS_ENABLED or not DEEPSEEK_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="Hosted inference is unavailable.",
+            )
 
+        return (
+            "https://api.deepseek.com/chat/completions",
+            {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+            {
+                **payload,
+                "thinking": {"type": "disabled"},
+            },
+        )
+
+    return OLLAMA_URL, {}, payload
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatRequest,
@@ -196,19 +213,17 @@ async def chat_completions(
             }
 
             try:
-                if model_key == "deepseek":
-                    url = "https://api.deepseek.com/chat/completions"
-                    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
-                    payload["thinking"] = {"type": "disabled"}
-                else:
-                    url = OLLAMA_URL
-                    headers = {}
+                url, headers, outbound_payload = prepare_backend_request(
+                    model_key,
+                    payload,
+                )
 
                 result = await client.post(
                     url,
                     headers=headers,
-                    json=payload,
+                    json=outbound_payload,
                 )
+                result.raise_for_status()
                 result.raise_for_status()
 
                 latency_ms = round(
@@ -245,13 +260,16 @@ async def chat_completions(
                 last_status = 504
 
             except httpx.HTTPStatusError as exc:
-                last_error = f"Ollama returned an HTTP error: {exc}"
+                last_error = (
+                    f"{model_key} returned an HTTP error: {exc}"
+                )
                 last_status = 502
 
             except httpx.RequestError as exc:
-                last_error = f"Could not connect to {model_key}: {exc}"
+                last_error = (
+                    f"Could not connect to {model_key}: {exc}"
+                )
                 last_status = 503
-
     raise HTTPException(
         status_code=last_status,
         detail={
