@@ -34,6 +34,8 @@ def save_request(
         "attempts",
         "backend",
         "fallback_used",
+        "sensitive",
+        "allow_paid",    
         "input_tokens",
         "output_tokens",
     }

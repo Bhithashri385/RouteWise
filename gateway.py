@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 import asyncio
 import logging
 import time
@@ -57,9 +60,17 @@ async def track_request(request: HTTPRequest, call_next):
 
 OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
 
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+
+PAID_APIS_ENABLED = (
+    os.getenv("ENABLE_PAID_APIS", "false").lower() == "true"
+)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
 MODELS = {
     "general": "qwen2.5:1.5b",
     "coding": "qwen2.5-coder:1.5b",
+    "deepseek": DEEPSEEK_MODEL,
 }
 
 
@@ -72,14 +83,14 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    model: Literal["auto", "local", "general", "coding"] = "auto"
+    model: Literal["auto", "local", "general", "coding", "deepseek"] = "auto"
     task: Literal["general", "coding"] = "general"
     messages: list[Message] = Field(min_length=1, max_length=10)
     max_tokens: int = Field(default=256, ge=1, le=512)
     stream: Literal[False] = False
     allow_fallback: bool = False
-
+    sensitive: bool = False
+    allow_paid: bool = False
 
 @app.get("/health")
 async def health():
@@ -98,7 +109,29 @@ async def chat_completions(
 ):
 
     # Select the primary model.
-    if request.model in ("general", "coding"):
+    if request.model == "deepseek":
+        if request.sensitive:
+            raise HTTPException(
+                status_code=403,
+                detail="Sensitive requests cannot use hosted models.",
+            )
+
+        if not PAID_APIS_ENABLED or not request.allow_paid:
+            raise HTTPException(
+                status_code=403,
+                detail="Paid API use requires server and request permission.",
+            )
+
+        if not DEEPSEEK_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="DeepSeek is not configured.",
+            )
+
+        selected = "deepseek"
+        reason = "explicit hosted model selection"
+
+    elif request.model in ("general", "coding"):
         selected = request.model
         reason = "explicit model selection"
     elif request.model == "local":
@@ -109,7 +142,6 @@ async def chat_completions(
         reason = f"automatic routing based on task: {request.task}"
 
     # Prepare the attempt order.
-
     http_request.state.metrics.update({
         "requested_model": request.model,
         "task": request.task,
@@ -119,13 +151,18 @@ async def chat_completions(
         "fallback_used": False,
         "input_tokens": None,
         "output_tokens": None,
+        "sensitive": request.sensitive,
+        "allow_paid": request.allow_paid,
     })
 
     attempts = [selected]
 
     if request.allow_fallback:
-        alternate = "coding" if selected == "general" else "general"
-        attempts.append(alternate)
+        if selected == "deepseek":
+            attempts.append("general")
+        else:
+            alternate = "coding" if selected == "general" else "general"
+            attempts.append(alternate)
 
     started = time.perf_counter()
     last_error = "Ollama request failed"
@@ -134,7 +171,11 @@ async def chat_completions(
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         for model_key in attempts:
-            ollama_model = MODELS[model_key]
+            ollama_model = (
+                DEEPSEEK_MODEL
+                if model_key == "deepseek"
+                else MODELS[model_key]
+            )
             attempted_models.append(model_key)
 
             http_request.state.metrics["attempts"] = (
@@ -155,8 +196,17 @@ async def chat_completions(
             }
 
             try:
+                if model_key == "deepseek":
+                    url = "https://api.deepseek.com/chat/completions"
+                    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+                    payload["thinking"] = {"type": "disabled"}
+                else:
+                    url = OLLAMA_URL
+                    headers = {}
+
                 result = await client.post(
-                    OLLAMA_URL,
+                    url,
+                    headers=headers,
                     json=payload,
                 )
                 result.raise_for_status()
@@ -167,7 +217,9 @@ async def chat_completions(
                 )
 
                 response.headers["X-RouteWise-Backend"] = model_key
-                response.headers["X-RouteWise-Model"] = ollama_model
+                response.headers["X-RouteWise-Model"] = (
+                    DEEPSEEK_MODEL if model_key == "deepseek" else ollama_model
+                )
                 response.headers["X-RouteWise-Reason"] = reason
                 response.headers["X-RouteWise-Attempts"] = ",".join(
                     attempted_models
@@ -188,9 +240,8 @@ async def chat_completions(
                 })
 
                 return result.json()
-
             except httpx.TimeoutException:
-                last_error = "Ollama request timed out"
+                last_error = f"{model_key} request timed out"
                 last_status = 504
 
             except httpx.HTTPStatusError as exc:
@@ -198,7 +249,7 @@ async def chat_completions(
                 last_status = 502
 
             except httpx.RequestError as exc:
-                last_error = f"Could not connect to Ollama: {exc}"
+                last_error = f"Could not connect to {model_key}: {exc}"
                 last_status = 503
 
     raise HTTPException(

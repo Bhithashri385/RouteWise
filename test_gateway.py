@@ -125,3 +125,23 @@ def test_ollama_server_error():
         )
 
     assert response.status_code == 502
+def test_deepseek_blocked_when_paid_apis_disabled():
+    from unittest.mock import patch
+
+    with patch("gateway.PAID_APIS_ENABLED", False):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "deepseek",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ],
+                "allow_paid": True,
+                "sensitive": False,
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Paid API use requires server and request permission."
+    )
