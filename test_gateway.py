@@ -128,14 +128,12 @@ def test_ollama_server_error():
 def test_deepseek_blocked_when_paid_apis_disabled():
     from unittest.mock import patch
 
-    with patch("gateway.PAID_APIS_ENABLED", False):
+    with patch("providers.PAID_APIS_ENABLED", False):
         response = client.post(
             "/v1/chat/completions",
             json={
                 "model": "deepseek",
-                "messages": [
-                    {"role": "user", "content": "Hello"}
-                ],
+                "messages": [{"role": "user", "content": "Hello"}],
                 "allow_paid": True,
                 "sensitive": False,
             },
@@ -145,11 +143,13 @@ def test_deepseek_blocked_when_paid_apis_disabled():
     assert response.json()["detail"] == (
         "Paid API use requires server and request permission."
     )
+
 def test_deepseek_blocked_for_sensitive_request():
     from unittest.mock import patch
 
-    with patch("gateway.PAID_APIS_ENABLED", True), \
-         patch("gateway.DEEPSEEK_API_KEY", "test-key"):
+    with patch("providers.PAID_APIS_ENABLED", True), patch.dict(
+        "os.environ", {"DEEPSEEK_API_KEY": "test-key"}
+    ):
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -166,6 +166,7 @@ def test_deepseek_blocked_for_sensitive_request():
     assert response.json()["detail"] == (
         "Sensitive requests cannot use hosted models."
     )
+
 def test_auto_coding_uses_local_coding_model():
     from unittest.mock import patch, MagicMock
 
@@ -201,27 +202,25 @@ def test_auto_coding_uses_local_coding_model():
     )
     assert "api.deepseek.com" not in mock_post.call_args.args[0]
 def test_deepseek_fallback_to_local_general():
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     import httpx
 
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
+    mock_result = {
         "choices": [
             {"message": {"content": "Local fallback response"}}
         ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 8},
     }
-    mock_response.raise_for_status.return_value = None
 
-    with patch(
-        "gateway.httpx.AsyncClient.post",
+    with patch("providers.PAID_APIS_ENABLED", True), patch.dict(
+        "os.environ", {"DEEPSEEK_API_KEY": "test-key"}
+    ), patch(
+        "gateway.complete",
         side_effect=[
             httpx.ConnectError("DeepSeek unavailable"),
-            mock_response,
+            mock_result,
         ],
-    ) as mock_post, patch("gateway.PAID_APIS_ENABLED", True), patch(
-        "gateway.DEEPSEEK_API_KEY", "test-key"
-    ):
+    ) as mock_complete:
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -236,7 +235,75 @@ def test_deepseek_fallback_to_local_general():
         )
 
     assert response.status_code == 200
-    assert mock_post.call_count == 2
-    assert "api.deepseek.com" in mock_post.call_args_list[0].args[0]
-    assert "11434" in mock_post.call_args_list[1].args[0]
+    assert mock_complete.call_count == 2
+    assert mock_complete.call_args_list[0].kwargs["alias"] == "deepseek"
+    assert mock_complete.call_args_list[1].kwargs["alias"] == "general"
+    assert response.headers["X-RouteWise-Fallback"] == "true"
+
+
+def test_claude_blocked_when_paid_apis_disabled():
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "claude",
+            "task": "general",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "allow_paid": True,
+            "sensitive": False,
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_claude_blocked_for_sensitive_request():
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "claude",
+            "task": "general",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "allow_paid": True,
+            "sensitive": True,
+        },
+    )
+
+    assert response.status_code == 403
+def test_claude_fallback_to_local_general():
+    from unittest.mock import patch
+    import httpx
+
+    mock_result = {
+        "choices": [
+            {"message": {"content": "Local fallback response"}}
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 8},
+    }
+
+    with patch("providers.PAID_APIS_ENABLED", True), patch.dict(
+        "os.environ", {"ANTHROPIC_API_KEY": "test-key"}
+    ), patch(
+        "gateway.complete",
+        side_effect=[
+            httpx.ConnectError("Claude unavailable"),
+            mock_result,
+        ],
+    ) as mock_complete:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "claude",
+                "messages": [
+                    {"role": "user", "content": "Explain an API gateway"}
+                ],
+                "allow_paid": True,
+                "sensitive": False,
+                "allow_fallback": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert mock_complete.call_count == 2
+    assert mock_complete.call_args_list[0].kwargs["alias"] == "claude"
+    assert mock_complete.call_args_list[1].kwargs["alias"] == "general"
     assert response.headers["X-RouteWise-Fallback"] == "true"

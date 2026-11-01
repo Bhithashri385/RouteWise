@@ -5,6 +5,7 @@ import asyncio
 import logging
 import time
 import uuid
+from providers import BACKENDS, MODELS, complete, validate_access
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -58,22 +59,6 @@ async def track_request(request: HTTPRequest, call_next):
                 request_id,
             )
 
-OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
-
-PAID_APIS_ENABLED = (
-    os.getenv("ENABLE_PAID_APIS", "false").lower() == "true"
-)
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
-MODELS = {
-    "general": "qwen2.5:1.5b",
-    "coding": "qwen2.5-coder:1.5b",
-    "deepseek": DEEPSEEK_MODEL,
-}
-
-
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -83,7 +68,7 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: Literal["auto", "local", "general", "coding", "deepseek"] = "auto"
+    model: Literal["auto", "local", "general", "coding", "deepseek", "claude"] = "auto"
     task: Literal["general", "coding"] = "general"
     messages: list[Message] = Field(min_length=1, max_length=10)
     max_tokens: int = Field(default=256, ge=1, le=512)
@@ -100,65 +85,38 @@ async def health():
         "models": MODELS,
     }
 
-def prepare_backend_request(alias, payload):
-    if alias == "deepseek":
-        if not PAID_APIS_ENABLED or not DEEPSEEK_API_KEY:
-            raise HTTPException(
-                status_code=503,
-                detail="Hosted inference is unavailable.",
-            )
-
-        return (
-            "https://api.deepseek.com/chat/completions",
-            {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
-            {
-                **payload,
-                "thinking": {"type": "disabled"},
-            },
-        )
-
-    return OLLAMA_URL, {}, payload
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatRequest,
     response: Response,
     http_request: HTTPRequest,
 ):
-
     # Select the primary model.
-    if request.model == "deepseek":
-        if request.sensitive:
-            raise HTTPException(
-                status_code=403,
-                detail="Sensitive requests cannot use hosted models.",
-            )
-
-        if not PAID_APIS_ENABLED or not request.allow_paid:
-            raise HTTPException(
-                status_code=403,
-                detail="Paid API use requires server and request permission.",
-            )
-
-        if not DEEPSEEK_API_KEY:
-            raise HTTPException(
-                status_code=503,
-                detail="DeepSeek is not configured.",
-            )
-
-        selected = "deepseek"
+    if request.model in ("deepseek", "claude"):
+        selected = request.model
         reason = "explicit hosted model selection"
+
+        try:
+            validate_access(
+                selected,
+                request.sensitive,
+                request.allow_paid,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
 
     elif request.model in ("general", "coding"):
         selected = request.model
         reason = "explicit model selection"
+
     elif request.model == "local":
         selected = "general"
         reason = "local alias maps to general model"
+
     else:
         selected = request.task
         reason = f"automatic routing based on task: {request.task}"
 
-    # Prepare the attempt order.
     http_request.state.metrics.update({
         "requested_model": request.model,
         "task": request.task,
@@ -172,104 +130,87 @@ async def chat_completions(
         "allow_paid": request.allow_paid,
     })
 
+    # Prepare fallback order.
     attempts = [selected]
 
     if request.allow_fallback:
-        if selected == "deepseek":
+        if selected in ("deepseek", "claude"):
             attempts.append("general")
         else:
             alternate = "coding" if selected == "general" else "general"
             attempts.append(alternate)
 
     started = time.perf_counter()
-    last_error = "Ollama request failed"
+    last_error = "Provider request failed"
     last_status = 503
     attempted_models = []
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        for model_key in attempts:
-            ollama_model = (
-                DEEPSEEK_MODEL
-                if model_key == "deepseek"
-                else MODELS[model_key]
-            )
-            attempted_models.append(model_key)
+    payload = {
+        "messages": [
+            message.model_dump()
+            for message in request.messages
+        ],
+        "max_tokens": request.max_tokens,
+        "stream": False,
+    }
 
-            http_request.state.metrics["attempts"] = (
-                attempted_models.copy()
+    for model_key in attempts:
+        attempted_models.append(model_key)
+
+        http_request.state.metrics["attempts"] = attempted_models.copy()
+        http_request.state.metrics["fallback_used"] = model_key != selected
+
+        try:
+            result = await complete(
+                alias=model_key,
+                payload=payload,
+                sensitive=request.sensitive,
+                allow_paid=request.allow_paid,
             )
-            http_request.state.metrics["fallback_used"] = (
+
+            latency_ms = round(
+                (time.perf_counter() - started) * 1000,
+                2,
+            )
+
+            response.headers["X-RouteWise-Backend"] = model_key
+            response.headers["X-RouteWise-Model"] = BACKENDS[model_key].model
+            response.headers["X-RouteWise-Reason"] = reason
+            response.headers["X-RouteWise-Attempts"] = ",".join(attempted_models)
+            response.headers["X-RouteWise-Fallback"] = str(
                 model_key != selected
-            )
+            ).lower()
+            response.headers["X-RouteWise-Latency-Ms"] = str(latency_ms)
 
-            payload = {
-                "model": ollama_model,
-                "messages": [
-                    message.model_dump()
-                    for message in request.messages
-                ],
-                "max_tokens": request.max_tokens,
-                "stream": False,
-            }
+            usage = result.get("usage") or {}
 
-            try:
-                url, headers, outbound_payload = prepare_backend_request(
-                    model_key,
-                    payload,
-                )
+            http_request.state.metrics.update({
+                "backend": model_key,
+                "input_tokens": usage.get("prompt_tokens"),
+                "output_tokens": usage.get("completion_tokens"),
+            })
 
-                result = await client.post(
-                    url,
-                    headers=headers,
-                    json=outbound_payload,
-                )
-                result.raise_for_status()
-                result.raise_for_status()
+            return result
 
-                latency_ms = round(
-                    (time.perf_counter() - started) * 1000,
-                    2,
-                )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
 
-                response.headers["X-RouteWise-Backend"] = model_key
-                response.headers["X-RouteWise-Model"] = (
-                    DEEPSEEK_MODEL if model_key == "deepseek" else ollama_model
-                )
-                response.headers["X-RouteWise-Reason"] = reason
-                response.headers["X-RouteWise-Attempts"] = ",".join(
-                    attempted_models
-                )
-                response.headers["X-RouteWise-Fallback"] = str(
-                    model_key != selected
-                ).lower()
-                response.headers["X-RouteWise-Latency-Ms"] = str(
-                    latency_ms
-                )
+        except httpx.TimeoutException as exc:
+            last_error = f"{model_key} request timed out: {exc}"
+            last_status = 504
 
-                usage = result.json().get("usage") or {}
+        except httpx.HTTPStatusError as exc:
+            last_error = f"{model_key} returned an HTTP error: {exc}"
+            last_status = 502
 
-                http_request.state.metrics.update({
-                    "backend": model_key,
-                    "input_tokens": usage.get("prompt_tokens"),
-                    "output_tokens": usage.get("completion_tokens"),
-                })
+        except httpx.RequestError as exc:
+            last_error = f"Could not connect to {model_key}: {exc}"
+            last_status = 503
 
-                return result.json()
-            except httpx.TimeoutException:
-                last_error = f"{model_key} request timed out"
-                last_status = 504
+        except Exception as exc:
+            last_error = f"{model_key} provider failed: {exc}"
+            last_status = 502
 
-            except httpx.HTTPStatusError as exc:
-                last_error = (
-                    f"{model_key} returned an HTTP error: {exc}"
-                )
-                last_status = 502
-
-            except httpx.RequestError as exc:
-                last_error = (
-                    f"Could not connect to {model_key}: {exc}"
-                )
-                last_status = 503
     raise HTTPException(
         status_code=last_status,
         detail={
