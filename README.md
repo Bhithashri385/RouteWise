@@ -15,7 +15,7 @@ The project focuses on making AI inference easier to manage while maintaining co
 - **Unified API:** Provides a common chat-completions endpoint for model requests.
 - **Intelligent Routing:** Routes requests to general-purpose or coding models based on the selected model and task.
 - **Local Inference:** Uses Ollama to run language models locally.
-- **Hosted Model Support:** Includes configurable DeepSeek API integration.
+- **Hosted Model Support:** Includes configurable DeepSeek and Anthropic Claude API integration through LiteLLM.
 - **Fallback Handling:** Supports fallback to an alternate local model when enabled.
 - **Security Controls:** Blocks sensitive requests from using hosted models and enforces paid-API permissions.
 - **Request Validation:** Validates incoming requests and handles invalid inputs.
@@ -25,41 +25,43 @@ The project focuses on making AI inference easier to manage while maintaining co
 - **Automated Testing:** Includes gateway tests for routing, validation, permissions, errors, and fallback behavior.
 
 ## Architecture
-
-```text
                  Client Application
                          |
                          v
-                 FastAPI Gateway
-                         |
-             Request Validation
+                  FastAPI Gateway
                          |
                          v
-                Routing and Security
+                Request Validation
+                         |
+                         v
+               Routing and Security
+                         |
+                         v
+                   Provider Layer
                          |
               +----------+----------+
               |                     |
               v                     v
-        Local Inference       Hosted Inference
+         Local Adapter        LiteLLM Adapter
               |                     |
-              v                     v
-            Ollama              DeepSeek API
-              |                     |
-              +----------+----------+
-                         |
-                         v
-                  Model Response
-                         |
-                         v
-                Metrics Recording
-                         |
-                         v
-                 SQLite Database
-                         |
-                         v
-                Streamlit Dashboard
-```
-
+              v              +------+------+
+           Ollama             |             |
+              |               v             v
+              |          DeepSeek API  Claude API
+              |               |             |
+              +---------------+-------------+
+                              |
+                              v
+                       Model Response
+                              |
+                              v
+                      Metrics Recording
+                              |
+                              v
+                       SQLite Database
+                              |
+                              v
+                     Streamlit Dashboard
 Hosted inference is subject to the configured security and permission checks. Paid API access is disabled by default.
 
 ## Technology Stack
@@ -72,7 +74,7 @@ Hosted inference is subject to the configured security and permission checks. Pa
 | Local Model Runtime | Ollama |
 | General Model | Qwen 2.5 1.5B |
 | Coding Model | Qwen 2.5 Coder 1.5B |
-| Hosted Model Integration | DeepSeek API |
+| Hosted Model Integration | DeepSeek API, Anthropic Claude, LiteLLM |
 | HTTP Client | HTTPX |
 | Database | SQLite |
 | Dashboard | Streamlit |
@@ -87,7 +89,8 @@ Hosted inference is subject to the configured security and permission checks. Pa
 | `local` | Uses the default local general model |
 | `general` | Handles general-purpose questions |
 | `coding` | Handles programming-related questions |
-| `deepseek` | Requests hosted inference when permissions allow |
+| `deepseek` | Requests hosted DeepSeek inference when permissions allow |
+| `claude` | Requests hosted Anthropic Claude inference when permissions allow |
 
 The local models are managed through Ollama. Hosted inference requires a valid API configuration and the necessary permissions.
 
@@ -98,9 +101,9 @@ RouteWise supports automatic task-based routing and explicit model selection.
 For example:
 - General questions can be routed to Qwen 2.5 1.5B.
 - Programming questions can be routed to Qwen 2.5 Coder 1.5B.
-- Hosted DeepSeek requests are allowed only when the required security and permission checks pass.
+- Hosted DeepSeek and Claude requests are allowed only when the required security and permission checks pass.
 
-When fallback is enabled, a failed DeepSeek request can fall back to the local general model. Local requests do not automatically fall back to hosted inference.
+When fallback is enabled, a failed hosted-model request can fall back to the local general model. Local requests do not automatically fall back to hosted inference.
 
 ## Security and Configuration
 
@@ -109,7 +112,9 @@ RouteWise uses environment variables to configure hosted inference.
 Create a `.env` file in the project root:
 
 ```env
-DEEPSEEK_API_KEY=your_actual_api_key
+DEEPSEEK_API_KEY=your_deepseek_api_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
+CLAUDE_MODEL=claude-sonnet-4-6
 DEEPSEEK_MODEL=deepseek-flash
 ENABLE_PAID_APIS=false
 ```
@@ -272,16 +277,17 @@ The tests cover areas including:
 Run the Python syntax check with:
 
 ```bash
-python -m py_compile gateway.py
+python -m py_compile gateway.py providers.py
 ```
 
-**Testing note:** Automated tests and mocked fallback tests do not confirm that the real DeepSeek service has been contacted successfully. A live DeepSeek API request remains to be verified.
+**Testing note:** Automated tests and mocked fallback tests do not confirm that the real DeepSeek service has been contacted successfully. Live DeepSeek and Claude API requests remain to be verified; successful live provider responses have not yet been confirmed.
 
 ## Project Structure
 
 ```text
 RouteWise/
 ├── gateway.py
+├── providers.py
 ├── metrics_db.py
 ├── dashboard.py
 ├── test_gateway.py
@@ -300,7 +306,7 @@ The project includes a local AI gateway, general and coding model routing, confi
 The gateway test suite currently passes 11 tests.
 
 Potential future improvements include:
-- Verifying a live DeepSeek API request after checking billing and pricing.
+- Verifying live DeepSeek and Claude API requests after checking provider billing and pricing.
 - Expanding integration tests for hosted backend responses.
 - Improving dashboard visualizations and operational monitoring.
 - Adding more detailed performance comparisons between local models.
