@@ -1,11 +1,7 @@
-import os
-from pathlib import Path
-from dotenv import load_dotenv
 import asyncio
 import logging
 import time
 import uuid
-from providers import BACKENDS, MODELS, complete, validate_access
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -13,9 +9,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request as HTTPRequest, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from providers import BACKENDS, MODELS, complete, validate_access
 from metrics_db import save_request
 
-app = FastAPI(title="RouteWise — Day 3")
+
+app = FastAPI(title="RouteWise — Day 7")
 
 logger = logging.getLogger("routewise")
 
@@ -59,6 +57,7 @@ async def track_request(request: HTTPRequest, call_next):
                 request_id,
             )
 
+
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -68,7 +67,12 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: Literal["auto", "local", "general", "coding", "deepseek", "claude"] = "auto"
+
+    model: Literal[
+        "auto", "local", "general", "coding",
+        "remote", "deepseek", "claude"
+    ] = "auto"
+
     task: Literal["general", "coding"] = "general"
     messages: list[Message] = Field(min_length=1, max_length=10)
     max_tokens: int = Field(default=256, ge=1, le=512)
@@ -76,6 +80,7 @@ class ChatRequest(BaseModel):
     allow_fallback: bool = False
     sensitive: bool = False
     allow_paid: bool = False
+
 
 @app.get("/health")
 async def health():
@@ -85,25 +90,22 @@ async def health():
         "models": MODELS,
     }
 
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatRequest,
     response: Response,
     http_request: HTTPRequest,
 ):
-    # Select the primary model.
+    # Select the primary backend.
+
     if request.model in ("deepseek", "claude"):
         selected = request.model
         reason = "explicit hosted model selection"
 
-        try:
-            validate_access(
-                selected,
-                request.sensitive,
-                request.allow_paid,
-            )
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc))
+    elif request.model == "remote":
+        selected = "remote"
+        reason = "explicit remote Azure VM selection"
 
     elif request.model in ("general", "coding"):
         selected = request.model
@@ -117,6 +119,16 @@ async def chat_completions(
         selected = request.task
         reason = f"automatic routing based on task: {request.task}"
 
+    # Validate access before attempting inference.
+    try:
+        validate_access(
+            selected,
+            request.sensitive,
+            request.allow_paid,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
     http_request.state.metrics.update({
         "requested_model": request.model,
         "task": request.task,
@@ -128,16 +140,20 @@ async def chat_completions(
         "output_tokens": None,
         "sensitive": request.sensitive,
         "allow_paid": request.allow_paid,
+        "location": None,
     })
 
     # Prepare fallback order.
+
     attempts = [selected]
 
     if request.allow_fallback:
-        if selected in ("deepseek", "claude"):
+        if selected in ("deepseek", "claude", "remote"):
             attempts.append("general")
         else:
-            alternate = "coding" if selected == "general" else "general"
+            alternate = (
+                "coding" if selected == "general" else "general"
+            )
             attempts.append(alternate)
 
     started = time.perf_counter()
@@ -157,8 +173,12 @@ async def chat_completions(
     for model_key in attempts:
         attempted_models.append(model_key)
 
-        http_request.state.metrics["attempts"] = attempted_models.copy()
-        http_request.state.metrics["fallback_used"] = model_key != selected
+        http_request.state.metrics["attempts"] = (
+            attempted_models.copy()
+        )
+        http_request.state.metrics["fallback_used"] = (
+            model_key != selected
+        )
 
         try:
             result = await complete(
@@ -173,14 +193,29 @@ async def chat_completions(
                 2,
             )
 
+            # Identify where inference actually happened.
+            if model_key == "remote":
+                location = "azure-vm"
+            elif model_key in ("deepseek", "claude"):
+                location = "hosted-api"
+            else:
+                location = "laptop"
+
             response.headers["X-RouteWise-Backend"] = model_key
-            response.headers["X-RouteWise-Model"] = BACKENDS[model_key].model
+            response.headers["X-RouteWise-Model"] = (
+                BACKENDS[model_key].model
+            )
             response.headers["X-RouteWise-Reason"] = reason
-            response.headers["X-RouteWise-Attempts"] = ",".join(attempted_models)
+            response.headers["X-RouteWise-Attempts"] = (
+                ",".join(attempted_models)
+            )
             response.headers["X-RouteWise-Fallback"] = str(
                 model_key != selected
             ).lower()
-            response.headers["X-RouteWise-Latency-Ms"] = str(latency_ms)
+            response.headers["X-RouteWise-Latency-Ms"] = str(
+                latency_ms
+            )
+            response.headers["X-RouteWise-Location"] = location
 
             usage = result.get("usage") or {}
 
@@ -188,6 +223,7 @@ async def chat_completions(
                 "backend": model_key,
                 "input_tokens": usage.get("prompt_tokens"),
                 "output_tokens": usage.get("completion_tokens"),
+                "location": location,
             })
 
             return result

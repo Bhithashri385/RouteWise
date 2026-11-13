@@ -307,3 +307,144 @@ def test_claude_fallback_to_local_general():
     assert mock_complete.call_args_list[0].kwargs["alias"] == "claude"
     assert mock_complete.call_args_list[1].kwargs["alias"] == "general"
     assert response.headers["X-RouteWise-Fallback"] == "true"
+
+
+# ---------- REMOTE BACKEND TESTS ----------
+
+def test_remote_request_routes_to_remote_backend():
+    from unittest.mock import patch
+
+    mock_result = {
+        "choices": [
+            {"message": {"content": "Remote model response"}}
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 8},
+    }
+
+    with patch("gateway.complete", return_value=mock_result) as mock_complete:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "remote",
+                "messages": [
+                    {"role": "user", "content": "Explain cloud computing"}
+                ],
+                "max_tokens": 50,
+            },
+        )
+
+    assert response.status_code == 200
+    assert mock_complete.call_args.kwargs["alias"] == "remote"
+    assert response.headers["X-RouteWise-Backend"] == "remote"
+    assert response.headers["X-RouteWise-Location"] == "azure-vm"
+    assert response.headers["X-RouteWise-Fallback"] == "false"
+
+
+def test_sensitive_remote_request_rejected():
+    from unittest.mock import patch
+
+    with patch("gateway.complete") as mock_complete:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "remote",
+                "messages": [
+                    {"role": "user", "content": "Private information"}
+                ],
+                "sensitive": True,
+            },
+        )
+
+    assert response.status_code == 403
+    mock_complete.assert_not_called()
+
+
+def test_sensitive_auto_request_stays_on_laptop():
+    from unittest.mock import patch
+
+    mock_result = {
+        "choices": [
+            {"message": {"content": "Local model response"}}
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 8},
+    }
+
+    with patch("gateway.complete", return_value=mock_result) as mock_complete:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "task": "general",
+                "messages": [
+                    {"role": "user", "content": "Private question"}
+                ],
+                "sensitive": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert mock_complete.call_args.kwargs["alias"] == "general"
+    assert response.headers["X-RouteWise-Location"] == "laptop"
+
+
+def test_remote_unavailable_without_fallback():
+    from unittest.mock import patch
+    import httpx
+
+    with patch(
+        "gateway.complete",
+        side_effect=httpx.ConnectError("Remote VM unavailable"),
+    ) as mock_complete:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "remote",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ],
+                "allow_fallback": False,
+            },
+        )
+
+    assert response.status_code == 503
+    assert mock_complete.call_count == 1
+    assert response.json()["detail"]["attempts"] == ["remote"]
+
+
+def test_remote_unavailable_falls_back_to_local_general():
+    from unittest.mock import patch
+    import httpx
+
+    mock_result = {
+        "choices": [
+            {"message": {"content": "Local fallback response"}}
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 8},
+    }
+
+    with patch(
+        "gateway.complete",
+        side_effect=[
+            httpx.ConnectError("Remote VM unavailable"),
+            mock_result,
+        ],
+    ) as mock_complete:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "remote",
+                "messages": [
+                    {"role": "user", "content": "Explain an API gateway"}
+                ],
+                "allow_fallback": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert mock_complete.call_count == 2
+    assert mock_complete.call_args_list[0].kwargs["alias"] == "remote"
+    assert mock_complete.call_args_list[1].kwargs["alias"] == "general"
+    assert response.headers["X-RouteWise-Backend"] == "general"
+    assert response.headers["X-RouteWise-Location"] == "laptop"
+    assert response.headers["X-RouteWise-Fallback"] == "true"
+    assert response.headers["X-RouteWise-Attempts"] == "remote,general"

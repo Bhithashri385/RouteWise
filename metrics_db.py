@@ -38,6 +38,7 @@ def save_request(
         "allow_paid",    
         "input_tokens",
         "output_tokens",
+        "location",
     }
 
     safe_metadata = {

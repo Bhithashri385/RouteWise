@@ -13,7 +13,7 @@ class Backend:
     provider: str
     model: str
     requires_paid: bool = False
-
+    api_base: str | None = None
 
 BACKENDS = {
     "general": Backend(
@@ -25,6 +25,15 @@ BACKENDS = {
         name="coding",
         provider="ollama",
         model="qwen2.5-coder:1.5b",
+    ),
+    "remote": Backend(
+        name="remote",
+        provider="ollama",
+        model=os.getenv("REMOTE_MODEL", "qwen2.5:1.5b").strip(),
+        api_base=os.getenv(
+            "REMOTE_BASE",
+            "http://127.0.0.1:11435",
+        ).strip(),
     ),
     "deepseek": Backend(
         name="deepseek",
@@ -56,7 +65,10 @@ def validate_access(alias: str, sensitive: bool, allow_paid: bool):
 
     if backend is None:
         raise ValueError(f"Unknown backend: {alias}")
-
+    if alias == "remote" and sensitive:
+        raise PermissionError(
+            "Sensitive requests cannot use remote models."
+        )
     if backend.requires_paid:
         if sensitive:
             raise PermissionError(
@@ -81,21 +93,23 @@ async def complete(
     sensitive: bool = False,
     allow_paid: bool = False,
 ) -> dict:
+
     backend = validate_access(alias, sensitive, allow_paid)
 
     if backend.provider == "ollama":
         import httpx
 
+        ollama_url = backend.api_base or OLLAMA_URL
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                f"{OLLAMA_URL}/v1/chat/completions",
+                f"{ollama_url}/v1/chat/completions",
                 json={**payload, "model": backend.model},
             )
             response.raise_for_status()
             return response.json()
 
     from litellm import acompletion
-
     if backend.provider == "deepseek":
         api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         model = f"deepseek/{backend.model}"
