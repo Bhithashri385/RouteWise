@@ -1,131 +1,147 @@
-from dataclasses import dataclass
+
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from litellm import acompletion
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
-@dataclass
+PAID_APIS_ENABLED = (
+    os.getenv("ENABLE_PAID_APIS", "false").lower() == "true"
+)
+
+
+@dataclass(frozen=True)
 class Backend:
-    name: str
-    provider: str
     model: str
-    requires_paid: bool = False
+    hosted: bool
+    key_env: str | None = None
     api_base: str | None = None
+
 
 BACKENDS = {
     "general": Backend(
-        name="general",
-        provider="ollama",
-        model="qwen2.5:1.5b",
+        model="ollama_chat/qwen2.5:1.5b",
+        hosted=False,
+        api_base="http://127.0.0.1:11434",
     ),
     "coding": Backend(
-        name="coding",
-        provider="ollama",
-        model="qwen2.5-coder:1.5b",
+        model="ollama_chat/qwen2.5-coder:1.5b",
+        hosted=False,
+        api_base="http://127.0.0.1:11434",
     ),
     "remote": Backend(
-        name="remote",
-        provider="ollama",
-        model=os.getenv("REMOTE_MODEL", "qwen2.5:1.5b").strip(),
+        model=f"ollama_chat/{os.getenv('REMOTE_MODEL', 'qwen2.5:1.5b').strip()}",
+        hosted=False,
         api_base=os.getenv(
             "REMOTE_BASE",
             "http://127.0.0.1:11435",
         ).strip(),
     ),
     "deepseek": Backend(
-        name="deepseek",
-        provider="deepseek",
-        model=os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip(),
-        requires_paid=True,
+        model=f"deepseek/{os.getenv('DEEPSEEK_MODEL', 'deepseek-flash').strip()}",
+        hosted=True,
+        key_env="DEEPSEEK_API_KEY",
     ),
     "claude": Backend(
-        name="claude",
-        provider="anthropic",
-        model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6").strip(),
-        requires_paid=True,
+        model=f"anthropic/{os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6').strip()}",
+        hosted=True,
+        key_env="ANTHROPIC_API_KEY",
     ),
 }
+
 
 MODELS = {
     alias: backend.model
     for alias, backend in BACKENDS.items()
 }
 
-OLLAMA_URL = "http://127.0.0.1:11434"
-PAID_APIS_ENABLED = (
-    os.getenv("ENABLE_PAID_APIS", "false").lower() == "true"
-)
 
+class BackendError(Exception):
+    def __init__(self, message, status_code=502):
+        super().__init__(message)
+        self.status_code = status_codew
+    def __init__(self, message, status_code=502):
+        super().__init__(message)
+        self.status_code = status_code
 
-def validate_access(alias: str, sensitive: bool, allow_paid: bool):
+def validate_access(
+    alias: str,
+    sensitive: bool = False,
+    allow_paid: bool = False,
+):
     backend = BACKENDS.get(alias)
 
     if backend is None:
         raise ValueError(f"Unknown backend: {alias}")
-    if alias == "remote" and sensitive:
-        raise PermissionError(
-            "Sensitive requests cannot use remote models."
-        )
-    if backend.requires_paid:
-        if sensitive:
-            raise PermissionError(
-                "Sensitive requests cannot use hosted models."
-            )
 
+    if sensitive and backend.hosted:
+        raise PermissionError("Sensitive requests cannot use hosted models.")
+
+    if sensitive and alias == "remote":
+        raise PermissionError("Sensitive requests cannot use remote models.")
+    if backend.hosted:
         if not PAID_APIS_ENABLED or not allow_paid:
             raise PermissionError(
                 "Paid API use requires server and request permission."
             )
 
-        if alias == "deepseek" and not os.getenv("DEEPSEEK_API_KEY", "").strip():
-            raise PermissionError("DeepSeek API key is not configured.")
+        api_key = os.getenv(backend.key_env or "", "").strip()
 
-        if alias == "claude" and not os.getenv("ANTHROPIC_API_KEY", "").strip():
-            raise PermissionError("Anthropic API key is not configured.")
+        if not api_key:
+            raise PermissionError(
+                f"{backend.key_env} is not configured."
+            )
 
     return backend
+
+
 async def complete(
     alias: str,
-    payload: dict,
+    messages: list[dict],
+    max_tokens: int,
     sensitive: bool = False,
     allow_paid: bool = False,
 ) -> dict:
 
-    backend = validate_access(alias, sensitive, allow_paid)
-
-    if backend.provider == "ollama":
-        import httpx
-
-        ollama_url = backend.api_base or OLLAMA_URL
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{ollama_url}/v1/chat/completions",
-                json={**payload, "model": backend.model},
-            )
-            response.raise_for_status()
-            return response.json()
-
-    from litellm import acompletion
-    if backend.provider == "deepseek":
-        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        model = f"deepseek/{backend.model}"
-
-    elif backend.provider == "anthropic":
-        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-        model = f"anthropic/{backend.model}"
-
-    else:
-        raise ValueError(f"Unsupported provider: {backend.provider}")
-
-    response = await acompletion(
-        model=model,
-        messages=payload["messages"],
-        max_tokens=payload.get("max_tokens", 256),
-        api_key=api_key,
+    backend = validate_access(
+        alias,
+        sensitive=sensitive,
+        allow_paid=allow_paid,
     )
 
-    return response.model_dump()
+    api_key = (
+        os.getenv(backend.key_env, "").strip()
+        if backend.key_env
+        else None
+    )
+
+    try:
+        response = await acompletion(
+            model=backend.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            api_key=api_key,
+            api_base=backend.api_base,
+        )
+
+        return response.model_dump()
+
+    except Exception as exc:
+        import httpx
+
+        if isinstance(exc, httpx.TimeoutException):
+            status_code = 504
+        elif isinstance(exc, httpx.RequestError):
+            status_code = 503
+        else:
+            status_code = 502
+
+        raise BackendError(
+            f"{alias} provider failed: {exc}",
+            status_code=status_code,
+        ) from exc

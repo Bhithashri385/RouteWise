@@ -195,12 +195,114 @@ def test_auto_coding_uses_local_coding_model():
                 "allow_paid": True,
             },
         )
+def test_ollama_unavailable():
+    import httpx
+    from unittest.mock import patch, AsyncMock
+
+    with patch(
+        "providers.acompletion",
+        new_callable=AsyncMock,
+        side_effect=httpx.ConnectError("Connection failed"),
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "local",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 50,
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 503
+
+
+def test_ollama_timeout():
+    import httpx
+    from unittest.mock import patch, AsyncMock
+
+    with patch(
+        "providers.acompletion",
+        new_callable=AsyncMock,
+        side_effect=httpx.TimeoutException("Request timed out"),
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "local",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 50,
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 504
+
+
+def test_ollama_server_error():
+    import httpx
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    error = httpx.HTTPStatusError(
+        "Server error",
+        request=MagicMock(),
+        response=MagicMock(),
+    )
+
+    with patch(
+        "providers.acompletion",
+        new_callable=AsyncMock,
+        side_effect=error,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "local",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 50,
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 502
+
+
+def test_auto_coding_uses_local_coding_model():
+    from unittest.mock import patch, MagicMock, AsyncMock
+
+    mock_response = MagicMock()
+    mock_response.model_dump.return_value = {
+        "choices": [
+            {"message": {"content": "Here is the code."}}
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 8},
+    }
+
+    with patch(
+        "providers.acompletion",
+        new_callable=AsyncMock,
+        return_value=mock_response,
+    ) as mock_completion:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "task": "coding",
+                "messages": [
+                    {"role": "user", "content": "Write a Python function."}
+                ],
+                "sensitive": True,
+                "allow_paid": True,
+            },
+        )
 
     assert response.status_code == 200
-    assert mock_post.call_args.kwargs["json"]["model"] == (
-        "qwen2.5-coder:1.5b"
+    assert mock_completion.call_args.kwargs["model"] == (
+        "ollama_chat/qwen2.5-coder:1.5b"
     )
-    assert "api.deepseek.com" not in mock_post.call_args.args[0]
+    assert mock_completion.call_args.kwargs["api_base"] == (
+        "http://127.0.0.1:11434"
+    )
 def test_deepseek_fallback_to_local_general():
     from unittest.mock import patch
     import httpx

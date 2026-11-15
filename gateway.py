@@ -5,13 +5,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request as HTTPRequest, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from providers import BACKENDS, MODELS, complete, validate_access
+from providers import (
+    BACKENDS,
+    MODELS,
+    BackendError,
+    complete,
+    validate_access,
+)
 from metrics_db import save_request
-
 
 app = FastAPI(title="RouteWise — Day 7")
 
@@ -69,10 +73,14 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: Literal[
-        "auto", "local", "general", "coding",
-        "remote", "deepseek", "claude"
+        "auto",
+        "local",
+        "general",
+        "coding",
+        "deepseek",
+        "claude",
+        "remote",
     ] = "auto"
-
     task: Literal["general", "coding"] = "general"
     messages: list[Message] = Field(min_length=1, max_length=10)
     max_tokens: int = Field(default=256, ge=1, le=512)
@@ -91,44 +99,56 @@ async def health():
     }
 
 
+def select_routes(request: ChatRequest):
+    if request.model in BACKENDS:
+        selected = request.model
+        reason = "explicit model selection"
+
+    elif request.model == "local":
+        selected = "general"
+        reason = "local alias maps to general"
+
+    else:
+        selected = request.task
+        reason = f"local task routing: {request.task}"
+
+    validate_access(
+        selected,
+        sensitive=request.sensitive,
+        allow_paid=request.allow_paid,
+    )
+
+    routes = [selected]
+
+    if request.allow_fallback:
+        if BACKENDS[selected].hosted or selected == "remote":
+            routes.append("general")
+        else:
+            alternate = (
+                "coding" if selected == "general" else "general"
+            )
+            routes.append(alternate)
+
+    if request.sensitive:
+        reason = f"laptop-only privacy policy; {reason}"
+
+    return routes, reason
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatRequest,
     response: Response,
     http_request: HTTPRequest,
 ):
-    # Select the primary backend.
-
-    if request.model in ("deepseek", "claude"):
-        selected = request.model
-        reason = "explicit hosted model selection"
-
-    elif request.model == "remote":
-        selected = "remote"
-        reason = "explicit remote Azure VM selection"
-
-    elif request.model in ("general", "coding"):
-        selected = request.model
-        reason = "explicit model selection"
-
-    elif request.model == "local":
-        selected = "general"
-        reason = "local alias maps to general model"
-
-    else:
-        selected = request.task
-        reason = f"automatic routing based on task: {request.task}"
-
-    # Validate access before attempting inference.
+    # Select permitted routes.
     try:
-        validate_access(
-            selected,
-            request.sensitive,
-            request.allow_paid,
-        )
+        routes, reason = select_routes(request)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
+    selected = routes[0]
+    attempts = routes
+
+    # Initialize request metrics.
     http_request.state.metrics.update({
         "requested_model": request.model,
         "task": request.task,
@@ -143,33 +163,11 @@ async def chat_completions(
         "location": None,
     })
 
-    # Prepare fallback order.
-
-    attempts = [selected]
-
-    if request.allow_fallback:
-        if selected in ("deepseek", "claude", "remote"):
-            attempts.append("general")
-        else:
-            alternate = (
-                "coding" if selected == "general" else "general"
-            )
-            attempts.append(alternate)
-
     started = time.perf_counter()
     last_error = "Provider request failed"
     last_status = 503
     attempted_models = []
-
-    payload = {
-        "messages": [
-            message.model_dump()
-            for message in request.messages
-        ],
-        "max_tokens": request.max_tokens,
-        "stream": False,
-    }
-
+    # Try each permitted backend.
     for model_key in attempts:
         attempted_models.append(model_key)
 
@@ -183,17 +181,21 @@ async def chat_completions(
         try:
             result = await complete(
                 alias=model_key,
-                payload=payload,
+                messages=[
+                    message.model_dump()
+                    for message in request.messages
+                ],
+                max_tokens=request.max_tokens,
                 sensitive=request.sensitive,
                 allow_paid=request.allow_paid,
             )
 
+            # Successful response.
             latency_ms = round(
                 (time.perf_counter() - started) * 1000,
                 2,
             )
 
-            # Identify where inference actually happened.
             if model_key == "remote":
                 location = "azure-vm"
             elif model_key in ("deepseek", "claude"):
@@ -201,6 +203,7 @@ async def chat_completions(
             else:
                 location = "laptop"
 
+            # Response headers.
             response.headers["X-RouteWise-Backend"] = model_key
             response.headers["X-RouteWise-Model"] = (
                 BACKENDS[model_key].model
@@ -217,6 +220,7 @@ async def chat_completions(
             )
             response.headers["X-RouteWise-Location"] = location
 
+            # Extract token usage.
             usage = result.get("usage") or {}
 
             http_request.state.metrics.update({
@@ -229,24 +233,20 @@ async def chat_completions(
             return result
 
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc))
+            raise HTTPException(
+                status_code=403,
+                detail=str(exc),
+            )
 
-        except httpx.TimeoutException as exc:
-            last_error = f"{model_key} request timed out: {exc}"
-            last_status = 504
-
-        except httpx.HTTPStatusError as exc:
-            last_error = f"{model_key} returned an HTTP error: {exc}"
-            last_status = 502
-
-        except httpx.RequestError as exc:
-            last_error = f"Could not connect to {model_key}: {exc}"
-            last_status = 503
-
+        except BackendError as exc:
+            last_error = str(exc)
+            last_status = exc.status_code
+            continue
         except Exception as exc:
             last_error = f"{model_key} provider failed: {exc}"
-            last_status = 502
+            continue
 
+    # All permitted backends failed.
     raise HTTPException(
         status_code=last_status,
         detail={
