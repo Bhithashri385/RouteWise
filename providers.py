@@ -1,4 +1,4 @@
-
+import litellm
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +19,7 @@ PAID_APIS_ENABLED = (
 class Backend:
     model: str
     hosted: bool
+    on_device: bool = False
     key_env: str | None = None
     api_base: str | None = None
 
@@ -27,16 +28,22 @@ BACKENDS = {
     "general": Backend(
         model="ollama_chat/qwen2.5:1.5b",
         hosted=False,
+        on_device=True,
         api_base="http://127.0.0.1:11434",
     ),
     "coding": Backend(
         model="ollama_chat/qwen2.5-coder:1.5b",
         hosted=False,
+        on_device=True,
         api_base="http://127.0.0.1:11434",
     ),
     "remote": Backend(
-        model=f"ollama_chat/{os.getenv('REMOTE_MODEL', 'qwen2.5:1.5b').strip()}",
+        model=(
+            "ollama_chat/"
+            + os.getenv("REMOTE_MODEL", "qwen2.5:1.5b").strip()
+        ),
         hosted=False,
+        on_device=False,
         api_base=os.getenv(
             "REMOTE_BASE",
             "http://127.0.0.1:11435",
@@ -45,11 +52,13 @@ BACKENDS = {
     "deepseek": Backend(
         model=f"deepseek/{os.getenv('DEEPSEEK_MODEL', 'deepseek-flash').strip()}",
         hosted=True,
+        on_device=False,
         key_env="DEEPSEEK_API_KEY",
     ),
     "claude": Backend(
         model=f"anthropic/{os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6').strip()}",
         hosted=True,
+        on_device=False,
         key_env="ANTHROPIC_API_KEY",
     ),
 }
@@ -64,10 +73,8 @@ MODELS = {
 class BackendError(Exception):
     def __init__(self, message, status_code=502):
         super().__init__(message)
-        self.status_code = status_codew
-    def __init__(self, message, status_code=502):
-        super().__init__(message)
         self.status_code = status_code
+
 
 def validate_access(
     alias: str,
@@ -79,23 +86,29 @@ def validate_access(
     if backend is None:
         raise ValueError(f"Unknown backend: {alias}")
 
-    if sensitive and backend.hosted:
-        raise PermissionError("Sensitive requests cannot use hosted models.")
+    # Sensitive requests must stay on the laptop.
+    if sensitive and not backend.on_device:
+        raise PermissionError(
+            "Sensitive requests must stay on the laptop."
+        )
 
-    if sensitive and alias == "remote":
-        raise PermissionError("Sensitive requests cannot use remote models.")
-    if backend.hosted:
-        if not PAID_APIS_ENABLED or not allow_paid:
-            raise PermissionError(
-                "Paid API use requires server and request permission."
-            )
+    # Local and self-hosted cloud models do not require paid API permission.
+    if not backend.hosted:
+        return backend
 
-        api_key = os.getenv(backend.key_env or "", "").strip()
+    # Hosted APIs require both server and request permission.
+    if not PAID_APIS_ENABLED or not allow_paid:
+        raise PermissionError(
+            "Paid API use requires server and request permission."
+        )
 
-        if not api_key:
-            raise PermissionError(
-                f"{backend.key_env} is not configured."
-            )
+    if (
+        not MODELS[alias]
+        or not os.getenv(backend.key_env or "", "").strip()
+    ):
+        raise PermissionError(
+            "The selected hosted backend is not configured."
+        )
 
     return backend
 
@@ -136,7 +149,9 @@ async def complete(
 
         if isinstance(exc, httpx.TimeoutException):
             status_code = 504
-        elif isinstance(exc, httpx.RequestError):
+        elif isinstance(exc, httpx.HTTPStatusError):
+            status_code = 502
+        elif isinstance(exc, (httpx.RequestError, litellm.APIConnectionError)):
             status_code = 503
         else:
             status_code = 502

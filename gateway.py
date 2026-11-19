@@ -121,7 +121,7 @@ def select_routes(request: ChatRequest):
     routes = [selected]
 
     if request.allow_fallback:
-        if BACKENDS[selected].hosted or selected == "remote":
+        if not BACKENDS[selected].on_device:
             routes.append("general")
         else:
             alternate = (
@@ -196,13 +196,13 @@ async def chat_completions(
                 2,
             )
 
-            if model_key == "remote":
-                location = "azure-vm"
-            elif model_key in ("deepseek", "claude"):
-                location = "hosted-api"
-            else:
-                location = "laptop"
+            backend = BACKENDS[model_key]
 
+            location = (
+                "laptop" if backend.on_device
+                else "provider_api" if backend.hosted
+                else "cloud_vm"
+            )
             # Response headers.
             response.headers["X-RouteWise-Backend"] = model_key
             response.headers["X-RouteWise-Model"] = (
@@ -225,11 +225,11 @@ async def chat_completions(
 
             http_request.state.metrics.update({
                 "backend": model_key,
+                "actual_model": MODELS[model_key],
                 "input_tokens": usage.get("prompt_tokens"),
                 "output_tokens": usage.get("completion_tokens"),
                 "location": location,
             })
-
             return result
 
         except PermissionError as exc:

@@ -70,6 +70,8 @@ defaults = {
     "task": None,
     "reason": None,
     "backend": None,
+    "actual_model": None,
+    "location": None,
     "attempts": None,
     "fallback_used": False,
     "input_tokens": None,
@@ -116,6 +118,20 @@ else:
     )
     st.bar_chart(model_counts, x="backend", y="Successful Requests")
     st.dataframe(model_counts, hide_index=True, use_container_width=True)
+
+st.subheader("Successful Requests by Execution Location")
+located = successful[successful["location"].notna()]
+if located.empty:
+    st.info("No execution-location data recorded yet.")
+else:
+    location_counts = (
+        located.groupby("location")
+        .size()
+        .rename("Successful Requests")
+        .reset_index()
+    )
+    st.bar_chart(location_counts, x="location", y="Successful Requests")
+    st.dataframe(location_counts, hide_index=True, use_container_width=True)
 
 st.subheader("Token Usage")
 input_tokens = pd.to_numeric(data["input_tokens"], errors="coerce")
@@ -183,6 +199,8 @@ display_columns = [
     "status_code",
     "latency_ms",
     "backend",
+    "actual_model",
+    "location",
     "attempts",
     "fallback_used",
     "sensitive",

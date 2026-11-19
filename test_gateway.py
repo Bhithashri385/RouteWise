@@ -164,7 +164,7 @@ def test_deepseek_blocked_for_sensitive_request():
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Sensitive requests cannot use hosted models."
+        "Sensitive requests must stay on the laptop."
     )
 
 def test_auto_coding_uses_local_coding_model():
@@ -438,7 +438,7 @@ def test_remote_request_routes_to_remote_backend():
     assert response.status_code == 200
     assert mock_complete.call_args.kwargs["alias"] == "remote"
     assert response.headers["X-RouteWise-Backend"] == "remote"
-    assert response.headers["X-RouteWise-Location"] == "azure-vm"
+    assert response.headers["X-RouteWise-Location"] == "cloud_vm"
     assert response.headers["X-RouteWise-Fallback"] == "false"
 
 

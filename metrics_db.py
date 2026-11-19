@@ -33,6 +33,7 @@ def save_request(
         "reason",
         "attempts",
         "backend",
+        "actual_model",
         "fallback_used",
         "sensitive",
         "allow_paid",    
