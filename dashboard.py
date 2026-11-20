@@ -2,6 +2,7 @@ import json
 import sqlite3
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from metrics_db import DB_PATH
@@ -55,6 +56,25 @@ with sqlite3.connect(DB_PATH, timeout=5) as connection:
         connection,
     )
 
+st.subheader("Backend Status")
+
+try:
+    response = requests.get(
+        "http://127.0.0.1:8000/backends",
+        timeout=10,
+    )
+    response.raise_for_status()
+
+    status = pd.DataFrame(response.json()["backends"])
+    st.dataframe(
+        status,
+        hide_index=True,
+        use_container_width=True,
+    )
+
+except (requests.RequestException, ValueError, KeyError):
+    st.warning("Cannot load backend status from the gateway.")
+
 if rows.empty:
     st.info("No requests recorded yet. Send a request through the gateway, then refresh.")
     st.stop()
@@ -73,6 +93,7 @@ defaults = {
     "actual_model": None,
     "location": None,
     "attempts": None,
+    "skipped": None,
     "fallback_used": False,
     "input_tokens": None,
     "output_tokens": None,
@@ -86,6 +107,9 @@ data["fallback_used"] = data["fallback_used"].fillna(False).astype(bool)
 data["attempts"] = data["attempts"].apply(
     lambda value: value if isinstance(value, list) else []
 )
+data["skipped"] = data["skipped"].apply(
+    lambda value: value if isinstance(value, list) else []
+)
 
 total = len(data)
 success_count = int(data["successful"].sum())
@@ -97,7 +121,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Requests", total)
 c2.metric("Successful Requests", success_count)
 c3.metric("Failed Requests", failure_count)
-c4.metric("Fallback Requests", fallback_count)
+c4.metric("Requests that reached a fallback route", fallback_count)
 
 st.subheader("Response Times")
 l1, l2, l3 = st.columns(3)
@@ -182,9 +206,10 @@ if model_filter != "All":
         filtered["requested_model"].astype(str) == model_filter
     ]
 
-filtered["attempts"] = filtered["attempts"].apply(
-    lambda attempts: " → ".join(map(str, attempts)) if attempts else "—"
-)
+for column in ("attempts", "skipped"):
+    filtered[column] = filtered[column].apply(
+        lambda values: ", ".join(map(str, values)) if values else "—"
+    )
 filtered["fallback_used"] = filtered["fallback_used"].map(
     {True: "Yes", False: "No"}
 )
@@ -202,6 +227,7 @@ display_columns = [
     "actual_model",
     "location",
     "attempts",
+    "skipped",
     "fallback_used",
     "sensitive",
     "allow_paid",

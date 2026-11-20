@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from litellm import acompletion
+from resilience import CircuitBreaker, CircuitUnavailable
 
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -64,6 +65,11 @@ BACKENDS = {
 }
 
 
+CIRCUITS = {
+    alias: CircuitBreaker(threshold=3, cooldown=30)
+    for alias in BACKENDS
+}
+
 MODELS = {
     alias: backend.model
     for alias, backend in BACKENDS.items()
@@ -74,6 +80,11 @@ class BackendError(Exception):
     def __init__(self, message, status_code=502):
         super().__init__(message)
         self.status_code = status_code
+
+
+class CircuitOpenError(BackendError):
+    """Backend skipped because its circuit is open."""
+    pass
 
 
 def validate_access(
@@ -113,7 +124,7 @@ def validate_access(
     return backend
 
 
-async def complete(
+async def _complete_once(
     alias: str,
     messages: list[dict],
     max_tokens: int,
@@ -160,3 +171,51 @@ async def complete(
             f"{alias} provider failed: {exc}",
             status_code=status_code,
         ) from exc
+
+
+
+async def complete(
+    alias,
+    messages,
+    max_tokens,
+    *,
+    sensitive,
+    allow_paid,
+):
+    # Always validate privacy and paid API permissions first.
+    validate_access(
+        alias,
+        sensitive=sensitive,
+        allow_paid=allow_paid,
+    )
+
+    circuit = CIRCUITS[alias]
+
+    try:
+        token = circuit.admit()
+    except CircuitUnavailable:
+        raise CircuitOpenError(
+            "Backend temporarily skipped."
+        ) from None
+
+    success = None
+
+    try:
+        result = await _complete_once(
+            alias,
+            messages,
+            max_tokens,
+            sensitive=sensitive,
+            allow_paid=allow_paid,
+        )
+
+        success = True
+        return result
+
+    except BackendError:
+        success = False
+        raise
+
+    finally:
+        if success is not None:
+            circuit.finish(token, success)

@@ -12,10 +12,12 @@ from providers import (
     BACKENDS,
     MODELS,
     BackendError,
+    CircuitOpenError,
     complete,
     validate_access,
 )
 from metrics_db import save_request
+from readiness import backend_status
 
 app = FastAPI(title="RouteWise — Day 7")
 
@@ -99,6 +101,12 @@ async def health():
     }
 
 
+
+@app.get("/backends")
+async def backends():
+    return {"backends": await backend_status()}
+
+
 def select_routes(request: ChatRequest):
     if request.model in BACKENDS:
         selected = request.model
@@ -154,6 +162,7 @@ async def chat_completions(
         "task": request.task,
         "reason": reason,
         "attempts": [],
+        "skipped": [],
         "backend": None,
         "fallback_used": False,
         "input_tokens": None,
@@ -168,7 +177,7 @@ async def chat_completions(
     last_status = 503
     attempted_models = []
     # Try each permitted backend.
-    for model_key in attempts:
+    for route_index, model_key in enumerate(attempts):
         attempted_models.append(model_key)
 
         http_request.state.metrics["attempts"] = (
@@ -213,8 +222,11 @@ async def chat_completions(
                 ",".join(attempted_models)
             )
             response.headers["X-RouteWise-Fallback"] = str(
-                model_key != selected
+                route_index > 0
             ).lower()
+            response.headers["X-RouteWise-Skipped"] = ",".join(
+                http_request.state.metrics["skipped"]
+            )
             response.headers["X-RouteWise-Latency-Ms"] = str(
                 latency_ms
             )
@@ -237,6 +249,17 @@ async def chat_completions(
                 status_code=403,
                 detail=str(exc),
             )
+
+        except CircuitOpenError:
+            # Remove this backend because no provider call happened.
+            attempted_models.pop()
+            http_request.state.metrics["attempts"] = (
+                attempted_models.copy()
+            )
+            http_request.state.metrics["skipped"].append(
+                model_key
+            )
+            continue
 
         except BackendError as exc:
             last_error = str(exc)
