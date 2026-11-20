@@ -32,6 +32,7 @@ def save_request(
         "task",
         "reason",
         "attempts",
+        "skipped",
         "backend",
         "actual_model",
         "fallback_used",
